@@ -1,0 +1,21 @@
+多功能圖片影音製作器 V4.2 修改說明
+
+修改日期：2026-04-30
+
+本次主要修正 macOS 上介面文字可能看不到或對比不足的問題，並保留 Windows 可正常使用。
+
+主要修改：
+1. 版本號由 V4.1 更新為 V4.2。
+2. 程式啟動時改用 Qt Fusion 樣式，降低 Windows 與 macOS 原生樣式差異。
+3. 重新整理整體介面配色，明確指定背景色與文字色，避免 macOS 深色/淺色模式造成白字白底或低對比。
+4. 補齊 QLabel、QCheckBox、QRadioButton、QPushButton、QLineEdit、QSpinBox、QComboBox、QTextEdit、QListWidget 的顏色設定。
+5. 新增停用狀態的按鈕與輸入欄樣式，讓「影片不支援」與已鎖定的秒數欄位仍可清楚閱讀。
+6. 移除開啟舊專案時對秒數欄位單獨套用 lightgrey 的寫法，改由統一樣式管理。
+7. 刪除按鈕改用專用 dangerButton 樣式，避免只有背景色、沒有文字色時在不同系統上顯示不清楚。
+
+驗證項目：
+1. 已執行 Python 語法檢查：
+   python3 -m py_compile 多功能圖片影音製作器for_exe_加字幕C槽V4.py
+
+備註：
+影片輸出流程沿用 V4.1 的修正，本版主要是跨平台介面顯示優化。
