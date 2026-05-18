@@ -3,7 +3,7 @@
 from pathlib import Path
 
 ROOT = Path(SPECPATH)
-APP_NAME = "多功能圖片影音製作器V5.2"
+APP_NAME = "多功能圖片影音製作器V5.3"
 ENTRY_SCRIPT = ROOT / "多功能圖片影音製作器V5.py"
 
 # FFmpeg 執行檔 (若有)

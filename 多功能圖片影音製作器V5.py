@@ -12,7 +12,7 @@ from PyQt5.QtMultimedia import QMediaPlayer, QMediaContent
 from PyQt5.QtCore import QUrl, QTimer
 from PyQt5.QtWidgets import QSizePolicy
 
-APP_VERSION = "V5.2"
+APP_VERSION = "V5.3"
 APP_TITLE = f"多功能圖片影音製作器-影像、音樂與轉場自由搭配{APP_VERSION} (Made by 阿剛老師)"
 
 
@@ -207,6 +207,22 @@ def format_time(seconds):
     return f"{m:02d}:{s:02d}.{t}"
 
 
+def parse_time(text):
+    """將時間字串解析為秒數，支援 mm:ss.t / mm:ss / hh:mm:ss.t / 純秒數。失敗回傳 None。"""
+    text = text.strip()
+    try:
+        parts = text.replace(",", ".").split(":")
+        if len(parts) == 1:
+            return float(parts[0])
+        elif len(parts) == 2:
+            return int(parts[0]) * 60 + float(parts[1])
+        elif len(parts) == 3:
+            return int(parts[0]) * 3600 + int(parts[1]) * 60 + float(parts[2])
+    except (ValueError, IndexError):
+        pass
+    return None
+
+
 
 # ===============================
 # 帶時間軸的預覽播放視窗
@@ -222,16 +238,16 @@ class VideoPreviewPlayer(QtWidgets.QDialog):
     # action: "start" / "end" / None
     set_position = QtCore.pyqtSignal(str, float)
 
-    def __init__(self, file_path, play_start, play_end, total_duration, parent=None):
-        super().__init__(parent, QtCore.Qt.Window)
+    def __init__(self, file_path, play_start, play_end, total_duration, initial_pos=None, parent=None):
+        super().__init__(parent, QtCore.Qt.Window | QtCore.Qt.WindowStaysOnTopHint)
         self.file_path       = file_path
         self.play_start      = play_start      # 裁切起點
         self.play_end        = play_end        # 裁切終點
         self.total_duration  = total_duration
         self._ffplay_proc    = None
         self._playing        = False
-        self._cur_pos        = play_start      # 目前播放位置（秒）
-        self._play_start_sec = play_start
+        self._cur_pos        = initial_pos if initial_pos is not None else play_start
+        self._play_start_sec = self._cur_pos
         self._play_start_wall = None           # 系統時間戳
         self._slider_dragging = False
 
@@ -253,7 +269,7 @@ class VideoPreviewPlayer(QtWidgets.QDialog):
         self.slider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
         self.slider.setMinimum(0)
         self.slider.setMaximum(max(1, int(total_duration * 10)))
-        self.slider.setValue(int(play_start * 10))
+        self.slider.setValue(int(self._cur_pos * 10))
         self.slider.setToolTip("拖曳可跳至指定位置重新播放")
         slider_row.addWidget(self.slider, stretch=1)
 
@@ -308,7 +324,7 @@ class VideoPreviewPlayer(QtWidgets.QDialog):
         self._ffplay_title = ""
 
         # ── 連接 ────────────────────────────────────────────────────────
-        self.btn_play.clicked.connect(self._do_play)
+        self.btn_play.clicked.connect(lambda: self._do_play())
         self.btn_pause.clicked.connect(self._do_pause)
         self.btn_stop.clicked.connect(self._do_stop)
         self.btn_set_start.clicked.connect(self._emit_start)
@@ -347,7 +363,8 @@ class VideoPreviewPlayer(QtWidgets.QDialog):
         ]
         try:
             self._ffplay_proc = subprocess.Popen(
-                cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+                cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                **hidden_subprocess_kwargs()
             )
             self._play_start_sec  = start
             self._play_start_wall = _time.time()
@@ -403,18 +420,32 @@ class VideoPreviewPlayer(QtWidgets.QDialog):
             dlg_x = rect.x()
             dlg_y = rect.y()
             dlg_w = rect.width()
-            
+
             ff_w = 640
             ff_h = 360
             ff_x = dlg_x + (dlg_w - ff_w) // 2
             ff_y = dlg_y - ff_h
-            
+
             # 如果上方超出螢幕，則貼在頂部
             if ff_y < 0:
                 ff_y = 0
-            
-            # SWP_NOZORDER=0x0004, SWP_SHOWWINDOW=0x0040
-            ctypes.windll.user32.SetWindowPos(hwnd, 0, ff_x, ff_y, ff_w, ff_h, 0x0004 | 0x0040)
+
+            # 第一步：設為 TOPMOST（僅改 z-order，不移動）
+            HWND_TOPMOST  = -1
+            SWP_NOMOVE    = 0x0002
+            SWP_NOSIZE    = 0x0001
+            SWP_NOACTIVATE = 0x0010
+            ctypes.windll.user32.SetWindowPos(
+                hwnd, HWND_TOPMOST, 0, 0, 0, 0,
+                SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE
+            )
+            # 第二步：貼合位置（保持 z-order 不變）
+            SWP_NOZORDER   = 0x0004
+            SWP_SHOWWINDOW = 0x0040
+            ctypes.windll.user32.SetWindowPos(
+                hwnd, 0, ff_x, ff_y, ff_w, ff_h,
+                SWP_NOZORDER | SWP_SHOWWINDOW
+            )
 
     def showEvent(self, event):
         """顯示時確保視窗下方有足夠空間顯示控制列，上方留給影片"""
@@ -518,6 +549,7 @@ class VideoEditDialog(QtWidgets.QDialog):
         self.split_time = None
         self._frame_tmp = None
         self._preview_sec = self.trim_start
+        self._preview_player = None
 
         # 防抖 timer：滑桿停止移動後 300ms 才抽幀
         self._debounce_timer = QTimer(self)
@@ -596,9 +628,11 @@ class VideoEditDialog(QtWidgets.QDialog):
         self.seek_slider.setValue(int(self._preview_sec * 10))
         self.seek_slider.setToolTip("拖曳可預覽該時間點的畫面")
         seek_layout.addWidget(self.seek_slider)
-        self.lbl_seek_time = QtWidgets.QLabel(format_time(self._preview_sec))
-        self.lbl_seek_time.setMinimumWidth(65)
-        seek_layout.addWidget(self.lbl_seek_time)
+        self.edit_seek_time = QtWidgets.QLineEdit(format_time(self._preview_sec))
+        self.edit_seek_time.setFixedWidth(72)
+        self.edit_seek_time.setAlignment(QtCore.Qt.AlignCenter)
+        self.edit_seek_time.setToolTip("可直接輸入時間（格式：mm:ss.t），按 Enter 套用")
+        seek_layout.addWidget(self.edit_seek_time)
         main_layout.addWidget(seek_box)
 
         # ── 起點 / 終點 ────────────────────────────────────────────
@@ -613,9 +647,11 @@ class VideoEditDialog(QtWidgets.QDialog):
         self.start_slider.setMaximum(max(1, int(self.total_duration * 10)))
         self.start_slider.setValue(int(self.trim_start * 10))
         start_row.addWidget(self.start_slider, stretch=1)
-        self.lbl_start = QtWidgets.QLabel(format_time(self.trim_start))
-        self.lbl_start.setMinimumWidth(65)
-        start_row.addWidget(self.lbl_start)
+        self.edit_start = QtWidgets.QLineEdit(format_time(self.trim_start))
+        self.edit_start.setFixedWidth(72)
+        self.edit_start.setAlignment(QtCore.Qt.AlignCenter)
+        self.edit_start.setToolTip("可直接輸入時間（格式：mm:ss.t），按 Enter 套用")
+        start_row.addWidget(self.edit_start)
         btn_set_start = QtWidgets.QPushButton("← 設為預覽位置")
         btn_set_start.clicked.connect(self._set_start_to_preview)
         start_row.addWidget(btn_set_start)
@@ -629,9 +665,11 @@ class VideoEditDialog(QtWidgets.QDialog):
         self.end_slider.setMaximum(max(1, int(self.total_duration * 10)))
         self.end_slider.setValue(int(self.trim_end * 10))
         end_row.addWidget(self.end_slider, stretch=1)
-        self.lbl_end = QtWidgets.QLabel(format_time(self.trim_end))
-        self.lbl_end.setMinimumWidth(65)
-        end_row.addWidget(self.lbl_end)
+        self.edit_end = QtWidgets.QLineEdit(format_time(self.trim_end))
+        self.edit_end.setFixedWidth(72)
+        self.edit_end.setAlignment(QtCore.Qt.AlignCenter)
+        self.edit_end.setToolTip("可直接輸入時間（格式：mm:ss.t），按 Enter 套用")
+        end_row.addWidget(self.edit_end)
         btn_set_end = QtWidgets.QPushButton("← 設為預覽位置")
         btn_set_end.clicked.connect(self._set_end_to_preview)
         end_row.addWidget(btn_set_end)
@@ -650,9 +688,11 @@ class VideoEditDialog(QtWidgets.QDialog):
         self.split_slider.setMaximum(max(1, int(self.total_duration * 10)))
         self.split_slider.setValue(max(1, int(self.total_duration * 10 / 2)))
         split_row.addWidget(self.split_slider, stretch=1)
-        self.lbl_split = QtWidgets.QLabel(format_time(self.total_duration / 2))
-        self.lbl_split.setMinimumWidth(65)
-        split_row.addWidget(self.lbl_split)
+        self.edit_split = QtWidgets.QLineEdit(format_time(self.total_duration / 2))
+        self.edit_split.setFixedWidth(72)
+        self.edit_split.setAlignment(QtCore.Qt.AlignCenter)
+        self.edit_split.setToolTip("可直接輸入時間（格式：mm:ss.t），按 Enter 套用")
+        split_row.addWidget(self.edit_split)
         btn_set_split = QtWidgets.QPushButton("← 設為預覽位置")
         btn_set_split.clicked.connect(self._set_split_to_preview)
         split_row.addWidget(btn_set_split)
@@ -693,6 +733,10 @@ class VideoEditDialog(QtWidgets.QDialog):
         self.start_slider.valueChanged.connect(self._on_start_changed)
         self.end_slider.valueChanged.connect(self._on_end_changed)
         self.split_slider.valueChanged.connect(self._on_split_changed)
+        self.edit_seek_time.editingFinished.connect(self._on_seek_time_edited)
+        self.edit_start.editingFinished.connect(self._on_start_edited)
+        self.edit_end.editingFinished.connect(self._on_end_edited)
+        self.edit_split.editingFinished.connect(self._on_split_edited)
         self.btn_ok.clicked.connect(self.accept)
         self.btn_cancel.clicked.connect(self.reject)
 
@@ -702,7 +746,9 @@ class VideoEditDialog(QtWidgets.QDialog):
     def _on_seek_changed(self, val):
         t = val / 10.0
         self._preview_sec = t
-        self.lbl_seek_time.setText(format_time(t))
+        self.edit_seek_time.blockSignals(True)
+        self.edit_seek_time.setText(format_time(t))
+        self.edit_seek_time.blockSignals(False)
         self.lbl_preview_time.setText(f"預覽：{format_time(t)}")
         self._debounce_timer.start()
 
@@ -748,24 +794,37 @@ class VideoEditDialog(QtWidgets.QDialog):
     # ffplay 內嵌播放
     # ------------------------------------------------------------------
     def _on_ffplay(self):
-        """開啟帶時間軸的獨立預覽播放視窗"""
+        """開啟帶時間軸的獨立預覽播放視窗（單一實例）"""
         if self.trim_end - self.trim_start <= 0:
             QtWidgets.QMessageBox.warning(self, "警告", "裁切區間長度為 0，請調整起點/終點。")
             return
+
+        # 若播放視窗已開著，直接從新位置播放，不重複建立
+        if self._preview_player is not None and self._preview_player.isVisible():
+            self._preview_player.raise_()
+            self._preview_player.activateWindow()
+            self._preview_player._do_play(from_pos=self._preview_sec)
+            return
+
         dlg = VideoPreviewPlayer(
             self.file_path,
             play_start=self.trim_start,
             play_end=self.trim_end,
             total_duration=self.total_duration,
+            initial_pos=self._preview_sec,
             parent=self
         )
+
         def _on_set_pos(action, sec):
             if action == "start":
                 self.start_slider.setValue(int(sec * 10))
             elif action == "end":
                 self.end_slider.setValue(int(sec * 10))
+
         dlg.set_position.connect(_on_set_pos)
-        dlg.show()   # 非阻塞，讓兩個視窗可同時操作
+        dlg.finished.connect(lambda: setattr(self, '_preview_player', None))
+        self._preview_player = dlg
+        dlg.show()
 
     def _on_start_changed(self, val):
         t = val / 10.0
@@ -775,7 +834,9 @@ class VideoEditDialog(QtWidgets.QDialog):
             self.start_slider.setValue(int(t * 10))
             self.start_slider.blockSignals(False)
         self.trim_start = t
-        self.lbl_start.setText(format_time(t))
+        self.edit_start.blockSignals(True)
+        self.edit_start.setText(format_time(t))
+        self.edit_start.blockSignals(False)
 
     def _on_end_changed(self, val):
         t = val / 10.0
@@ -785,7 +846,42 @@ class VideoEditDialog(QtWidgets.QDialog):
             self.end_slider.setValue(int(t * 10))
             self.end_slider.blockSignals(False)
         self.trim_end = t
-        self.lbl_end.setText(format_time(t))
+        self.edit_end.blockSignals(True)
+        self.edit_end.setText(format_time(t))
+        self.edit_end.blockSignals(False)
+
+    # ── 時間輸入框手動編輯 ────────────────────────────────────────────────
+    def _on_seek_time_edited(self):
+        t = parse_time(self.edit_seek_time.text())
+        if t is None:
+            self.edit_seek_time.setText(format_time(self._preview_sec))
+            return
+        t = max(0.0, min(t, self.total_duration))
+        self.seek_slider.setValue(int(t * 10))
+
+    def _on_start_edited(self):
+        t = parse_time(self.edit_start.text())
+        if t is None:
+            self.edit_start.setText(format_time(self.trim_start))
+            return
+        t = max(0.0, min(t, self.total_duration))
+        self.start_slider.setValue(int(t * 10))
+
+    def _on_end_edited(self):
+        t = parse_time(self.edit_end.text())
+        if t is None:
+            self.edit_end.setText(format_time(self.trim_end))
+            return
+        t = max(0.0, min(t, self.total_duration))
+        self.end_slider.setValue(int(t * 10))
+
+    def _on_split_edited(self):
+        t = parse_time(self.edit_split.text())
+        if t is None:
+            self.edit_split.setText(format_time(self.split_slider.value() / 10.0))
+            return
+        t = max(0.0, min(t, self.total_duration))
+        self.split_slider.setValue(int(t * 10))
 
     def _set_start_to_preview(self):
         self.start_slider.setValue(int(self._preview_sec * 10))
@@ -798,7 +894,9 @@ class VideoEditDialog(QtWidgets.QDialog):
     # ------------------------------------------------------------------
     def _on_split_changed(self, val):
         t = val / 10.0
-        self.lbl_split.setText(format_time(t))
+        self.edit_split.blockSignals(True)
+        self.edit_split.setText(format_time(t))
+        self.edit_split.blockSignals(False)
 
     def _set_split_to_preview(self):
         self.split_slider.setValue(int(self._preview_sec * 10))
