@@ -154,6 +154,9 @@ def get_subtitle_font_path():
 
 
 def build_video_filter(width, height, add_subtitle=False, subtitle_text="", subtitle_color="white", fontsize="20", position="bottom", show_box=False, box_color="black", box_opacity=0.5):
+    # 強制偶數維度，避免 yuv420p/H.264 相容性問題及 scale 進位後 pad 尺寸不足的錯誤
+    width  = width  + (width  % 2)
+    height = height + (height % 2)
     filter_chain = f"scale={width}:{height}:force_original_aspect_ratio=decrease,pad={width}:{height}:(ow-iw)/2:(oh-ih)/2"
     if add_subtitle and subtitle_text:
         font_path = get_subtitle_font_path().replace("\\", "/")
@@ -1900,7 +1903,8 @@ class MainWindow(QtWidgets.QMainWindow):
                 start_sec = widget.startSpin.value()
                 end_sec = widget.endSpin.value()
                 full_length = widget.music_length
-                if abs(end_sec - full_length) < 0.1:
+                # 起點≈0 且 終點≈全長 才跳過裁切，否則一律裁切（避免起點偏移未套用）
+                if start_sec < 0.1 and abs(end_sec - full_length) < 0.1:
                     trimmed_music_files.append(widget.music_path)
                 else:
                     temp_dir = get_temp_dir()
@@ -1910,6 +1914,7 @@ class MainWindow(QtWidgets.QMainWindow):
                         "-ss", str(start_sec),
                         "-to", str(end_sec),
                         "-i", widget.music_path,
+                        "-vn",          # 忽略 MP3 內嵌封面等視訊串流
                         "-ac", "2",
                         "-ar", "44100",
                         "-c:a", "aac",
@@ -2215,6 +2220,7 @@ class MainWindow(QtWidgets.QMainWindow):
                     "-f", "concat",
                     "-safe", "0",
                     "-i", audio_list_txt,
+                    "-vn",          # 忽略任何殘留視訊串流
                     "-ac", "2",
                     "-ar", "44100",
                     "-c:a", "aac",
@@ -2238,7 +2244,9 @@ class MainWindow(QtWidgets.QMainWindow):
                 "-stream_loop", "-1",
                 "-i", combined_audio,
                 "-filter_complex",
-                f"[1:a]volume={music_volume}[bgm];[0:a][bgm]amix=inputs=2:duration=shortest",
+                f"[1:a]volume={music_volume}[bgm];[0:a][bgm]amix=inputs=2:duration=shortest[aout]",
+                "-map", "0:v:0",    # 明確只取影片的視訊，避免 auto-map 帶入音樂封面圖
+                "-map", "[aout]",   # 取混音後的音訊
                 "-c:v", "copy",
                 "-c:a", "aac",
                 "-shortest",
